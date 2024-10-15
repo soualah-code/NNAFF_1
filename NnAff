@@ -1,0 +1,831 @@
+#!/usr/bin/env python
+
+# NNAFF
+
+from typing import Any
+from affapy.aa import Affine 
+from itertools import product
+from mpmath import (fmul)
+import tensorflow as tf
+import numpy as np
+import argparse
+import keras
+import pickle
+import time
+import b_n
+import b8
+
+
+def relu_zon(self):
+        '''
+                Relu_Zonotope
+                Relu activation function is given by:
+                Relu(x) =
+                x for lx ≥ 0  (lx: the lower bounds)
+                0 for ux ≤ 0  (ux: the Upper bounds)
+                λx + ν + νε otherwise
+                with λ= (ux/(ux-lx)) and ν = (ux(1-λ))/2
+        '''
+        def getNew(self):
+
+            #Get a new noise symbol
+            keymax = max(self.xi)
+            keymax+= 1
+
+            return keymax
+	
+        '''
+                Zonotope approximation for the relu function by the affine forms
+                                                            : self :Input value to the relu function
+                                                            :return: zonotope approximation of the relu function
+        '''
+        # Extract lower and upper bounds from the input interval
+        t = self.interval
+        l = t.inf
+        u = t.sup
+        # Calculate lambda and nu which represents the minimum of the area of the parallelogram in the xy-plane
+        # and the center of the zonotope in the vertical axis respectively.
+        lam = u/(u-l)
+        nu = (u*(1-lam))/2
+        # Apply Relu
+        if l >= 0 :
+            self = self
+            return self
+        # Return zonotope approximation for Relu when upper bound is less than or equal to 0
+        elif u <= 0 :
+            self.x0 = 0.0
+            self.xi = {}
+            return Affine(x0=self.x0, xi={})
+        else :
+            # Compute new x0 and xi for the zonotope approximation
+            x0 = (self.x0 * lam)+ nu
+            xi = {}
+            keyMax = max(self.xi) if self.xi else 0
+            for i in range(keyMax + 1):
+                v = 0
+                if i in self.xi :
+
+                        v = fmul(self.xi[i], lam, rounding='u')
+                        
+                if v != 0:
+
+                    xi[i] = v
+            # Add new key to xi
+            xi[getNew(self)] = nu
+
+
+            return Affine(x0=x0, xi=xi)
+            
+            
+            return self.copy()
+        
+def compressed_aff(x, beta):
+    """
+    Combine the contributions in an affine form by grouping indices and summing their absolute values.
+
+    Parameters:
+    - x (Affine): The affine form to be transformed.
+    - beta (int): The size of groups to combine indices.
+
+    Returns:
+    - Affine: A new affine form with combined groups.
+    """
+    # Create a new structure to store the new contributions
+    new_xi = {}
+
+    # Get all the indices of xi and sort them
+    indices = sorted(x.xi.keys())
+
+    # Iterate over the indices according to the defined group size
+    for i in range(0, len(indices), beta):
+        group_indices = indices[i:i + beta]  # Select a group of indices of size beta
+        new_index = len(indices) + i // beta + 1  # Create a unique new index
+
+        # Combine the values using the sum of the absolute values of all indices in the group
+        new_value = sum(abs(x.xi[idx]) for idx in group_indices)
+
+        # Add the new combined term to new_xi
+        new_xi[new_index] = new_value
+
+    # If the number of indices is not an exact multiple of group_size,
+    # combine the remaining indices into a final group
+    if len(indices) % beta != 0:
+        remaining_indices = indices[-(len(indices) % beta):]
+        remaining_value = sum(abs(x.xi[idx]) for idx in remaining_indices)
+        new_index = len(indices) + len(indices) // beta + 1
+        new_xi[new_index] = remaining_value
+
+    # Create a new affine form with the unchanged x0 and updated xi
+    new_affine_form = Affine(x0=x.x0, xi=new_xi)
+
+    return new_affine_form
+
+class conv2D:
+    '''
+            Class representing a 2D convolutional layer.
+
+            This class encapsulates a 2D convolutional layer used in a Keras model.
+            It is responsible for applying convolutional operations on input images or feature maps.
+
+            Attributes:
+                    kernel (ndarray): The convolutional kernel weights.
+                    bias (ndarray): The bias weights associated with each filter.
+                    filters (int): The number of filters applied by the convolutional layer.
+                    kernel_size (int): The size of the convolutional kernel.
+                    padding (str): The type of padding used ('valid' or 'same').
+                   
+            Methods:
+                    __init__: Initializes the parameters of the convolutional layer.
+                    __call__: Calls the convolutional operation to obtain the result.
+                    conv: Performs the 2D convolution operation on the input data. 
+    
+    '''
+
+    def __init__(self, layer) -> None:
+        '''
+            Initialization of the conv2D class.
+        
+            Args: print("Chemin du modèle:", args.model_file)
+            layer : Keras convolution layer object.
+                
+        '''
+ 
+        print(' *** *** get conv2D layer informations *** ***\n')
+        self.kernel = layer.get_weights()[0]  # Get the kernel weights
+        self.bias = layer.get_weights()[1]    # Get the bias weights
+        self.filters = layer.filters           # Number of filters
+        print('Num_Filters =',self.filters)
+        self.kernel_size = layer.kernel_size[0]  # Kernel size
+        print('Kernel_Size =',self.kernel_size)
+        self.padding = layer.padding     # Padding
+        print('Padding =',self.padding)
+        self.activation_function = layer.activation # Get activation function
+        print('Activation Function =', self.activation_function)
+        print('\n')
+        
+        pass          
+       
+    def __call__(self, input_tensor, *args: Any, **kwds: Any) -> Any:
+        '''
+            Calling the conv2D class.
+
+            Args:
+                input_tensor : Input tensor.
+
+            Returns:
+                Output tensor after convolution.
+
+        '''
+        #Get the value of beta from the arguments
+        beta = kwds.get('beta', None)  
+        #print(f"[conv2D] beta received: {beta}")
+        return self.conv(input_tensor, self.kernel, self.kernel_size,self.filters, self.bias,self.padding,beta)
+
+        pass
+               
+    def conv(self, input, kernel, k, filters, bias, padding = 'valid',beta=None):
+        '''
+            Parameters:
+                - input: Input image or feature map
+                - kernel: Convolutional kernel (Weights)
+                - k: Size of the convolutional kernel
+                - filters: Number of filters to apply
+                - bias: Bias terms associated with each filter
+                - padding: Type of padding (default is 'valid', options: 'valid', 'same')
+            Returns: 
+                Result of the convolution operation
+        '''
+        #print(beta)
+        nn = len(input[-1])
+        # Calculate the output dimensions 
+        input_channels = len(input)
+        if padding == 'valid':
+            output_height = nn - k + 1
+            output_width = nn - k + 1
+            print(output_width)
+        elif padding == 'same':
+            output_height = nn
+            output_width = nn
+            print(output_width)
+            image = np.pad(image, ((0, 0), (k // 2, k // 2), (k // 2, k // 2)), mode='constant')
+        else:
+            raise ValueError("Invalid padding value. Must be 'valid' or 'same'.")
+    
+        # Initialize the output array
+        output = [[[0.0 for i in range (output_height)] for j in range (output_width)]for channel in range (filters)]
+        # Appliquer la convolution
+        for channel, i, j in product(range(filters),range(output_height),range(output_width)):
+            output[channel][i][j] = float(bias[channel])
+            for c, m, n in product (range(input_channels), range(k), range(k)):  
+                output[channel][i][j] += input[c][i+m][j+n] * float(kernel[m][n][c][channel])
+            # Apply the activation directly after the computation
+            if self.activation_function == tf.nn.relu:
+                output[channel][i][j] = relu_zon(output[channel][i][j])    
+            if beta:
+                output[channel][i][j] = compressed_aff(output[channel][i][j], beta)   
+                
+            
+                
+        return output 
+  
+class maxPool:
+    '''
+            Class representing a max pooling layer.
+
+            This class encapsulates a max pooling layer used in a Keras model.
+            It is used to perform dimensionality reduction via maximum pooling
+            on data or feature maps.
+
+            Attributes:
+                pool_size (int): Size of the pooling kernel.
+                stride (int): Stride of the pooling kernel.
+                filters (int): Number of filters from the previous layer.
+
+            Methods:
+                __init__: Initializes the parameters of the max pooling layer.
+                __call__: Calls the max pooling method to obtain the result.
+                maxpool: Performs the max pooling operation on the input data.
+    
+    '''
+
+    def __init__(self, layer) -> None:
+        '''
+            Initialization of the maxPool class.
+        
+            Args:
+                layer : Keras convolution layer object.
+        '''
+
+        print(' *** *** get maxPool layer informations *** ***\n')
+        self.pool_size =  layer.pool_size[0]
+        print('Pool_Size =',self.pool_size)
+        self.stride = layer.strides[0]
+        print('Stride =',self.stride)
+        self.filters = 0
+        print('\n')
+        pass
+    
+    def __call__(self, input_tensor, *args: Any, **kwds: Any) -> Any:
+        '''
+            Calling the maxPool class.
+
+            Args:
+                input_tensor : Input tensor.
+
+            Returns:
+                Output tensor after maxPooling.
+        '''
+        return self.maxpool(input_tensor, self.pool_size, self.stride, self.filters)
+
+        pass
+
+    def maxpool(self, input, pool_size, stride, filters):
+        '''
+            Parameters:
+                - input: Input data or feature map
+                - pool_size: Size of the pooling kernel
+                - stride: Stride value for pooling operation
+                - filters: Number of filters of the previous layers
+                - padding: Type of padding
+            Returns: 
+                Result of the maxPooling operation   
+        '''
+        # Get the dimensions of the input data
+        n, m = len(input[0]), len(input[1])
+        filters = len(input)
+        # Extract parameters
+        k = pool_size
+        s = stride 
+        p = 0
+        # Calculate the new dimensions after pooling 
+        new_n = ((n - k + 2 * p )// s) + 1
+        new_m = ((m - k + 2 * p )// s) + 1
+        print(new_n,new_m)
+        # Initialize the output array
+        y = [[[0.0 for j in range(new_n)] for i in range(new_m)]for channel in range (filters)]
+        for channel, i, j in product (range(filters),range(new_n),range(new_m)):
+            # Extract the submatrix corresponding to the kernel
+            submatrix = []
+            for ii in range(i*s, i*s+k):
+                row = []
+                for jj in range(j*s, j*s+k):
+                    row.append(input[channel][ii][jj])
+                submatrix.append(row)  
+            # Take the maximum value of the submatrix
+            max_value = submatrix[0][0]
+            for ii, jj in product (range(k), range(k)):
+                if submatrix[ii][jj].x0 > max_value.x0:
+                    max_value = submatrix[ii][jj]
+            y[channel][i][j] = max_value
+           
+        return y
+
+class flatten:
+    '''
+           Class representing a flatten layer.
+
+            This class encapsulates a flatten layer used in a neural network architecture.
+            It is responsible for converting multi-dimensional input data into a one-dimensional array.
+
+            Attributes:
+                    size (int): The size of the flattened representation.
+
+            Methods:
+                    __init__: Initializes the parameters of the flatten layer.
+                    __call__: Calls the flatten operation to obtain the result.
+                    flatten: Performs the flattening operation on the input data.
+    '''
+
+    def __init__(self, layer) -> None:
+        '''
+            Initialization of the flatten class.
+        
+            Args:
+                layer : Keras convolution layer object.
+        '''
+
+        print(' *** *** get flatten layer informations *** ***\n')
+        self.size = 0
+        print( 'Its the flattening operation, no parameters\n' )
+      
+        pass
+
+    def __call__(self, input_tensor, *args: Any, **kwds: Any) -> Any:
+        '''
+            Calling the flatten class.
+
+            Args:
+                input_tensor : Input tensor.
+
+            Returns:
+                Output tensor after flatten.
+        '''
+        return self.flatten(input_tensor, self.size)
+
+        pass
+
+    def flatten(self, input, filters):
+        '''
+            Parameters:
+                - input: Input data after a convolutional layer
+                - filters: Number of filters of previous layer
+            Returns: 
+                Flattened representation of the input data
+
+        '''
+        n = len (input[0])
+        filters = len(input)
+        flat_list = [0.0 for i in range (n*n*filters)]
+
+        for channel, i, j in product(range(filters), range(n), range(n)):
+       
+            flat_list[(channel * n * n) + (i * n) + j] = input[channel][i][j]  
+        
+        return flat_list
+
+class dense:
+    '''
+           Class representing a dense (fully connected) layer.
+
+            This class encapsulates a dense layer used in neural network architectures.
+            It is responsible for performing fully connected operations on input data.
+
+            Attributes:
+                    kernel (ndarray): The weights of the dense layer.
+                    bias (ndarray): The bias terms associated with each neuron.
+                    neurons (int): The number of neurons in the dense layer.
+
+            Methods:
+                    __init__: Initializes the parameters of the dense layer.
+                    __call__: Calls the dense operation to obtain the result.
+                    dense: Performs the fully connected operation on the input data.
+    '''
+
+    def __init__(self, layer) -> None:
+        '''
+            Initialization of the dense class.
+        
+            Args:
+                layer : Keras convolution layer object.
+        '''
+
+        print(' *** *** get dense layer informations *** ***\n  ')
+        self.kernel = layer.get_weights()[0]  # Get the kernel weights
+        self.bias = layer.get_weights()[1]    # Get the bias weights
+        self.neurones = layer.get_weights()[0].shape[1] # Get number of neurones
+        print('Num_neurones=',self.neurones)
+        self.activation_function = layer.activation # Get activation function
+        print('Activation Function =', self.activation_function)
+        print('\n')
+
+        pass
+
+    def __call__(self, input_tensor, *args: Any, **kwds: Any) -> Any:
+        '''
+            Calling the dense class.
+
+            Args:
+                input_tensor : Input tensor.
+
+            Returns:
+                Output tensor after dense.
+        '''
+        beta = kwds.get('beta', None)  # Obtenir la valeur de beta depuis les arguments
+        return self.dense(input_tensor, self.kernel, self.bias, self.neurones,beta)
+    
+        pass
+
+    def dense(self,input, kernel, bias, num_neurons, beta=None):
+        '''
+            Dense_layer 
+            Parameters:
+                - input: Input data for the fully connected layer
+                - kernel: Weights of the fully connected layer
+                - biais: Bias terms of the fully connected layer
+                - num_neurons: Number of neurons in the fully connected layer
+            Returns: 
+                Output of the fully connected layer
+        '''
+        # Get the size of the input data
+        n = len (input)
+        # Initialize the output list
+        y = [0.0 for i in range (num_neurons)]
+        # Iterate over each neuron in the fully connected layer
+        for i in range(num_neurons):
+            # Initialize the output value with the bias term 
+            y[i] = float(bias[i])
+            # Compute the weighted sum for the neuron
+            for j in range(n):
+                y[i] = y[i] + float(kernel[j][i]) * input[j]
+            # Apply the activation directly after the computation
+            if self.activation_function == tf.nn.relu:
+                y[i] = relu_zon(y[i])      
+            # Apply the compression if Beta is specified
+            if beta:
+                y[i] = compressed_aff(y[i], beta)    
+         
+        return y 
+'''
+            Class bindings for layer types.
+'''
+classBindings = {
+    'Conv2D' : conv2D,         # Convolutional 2D layer
+    'MaxPooling2D' : maxPool,  # Max pooling 2D layer
+    'Flatten' : flatten,       # Flatten layer
+    'Dense' : dense            # Dense (fully connected) layer
+}
+
+class myModel:
+    '''
+            Represents a custom model wrapper
+    '''
+
+    def __init__(self, model) -> None:
+        '''
+           Initializes the model wrapper.
+
+            Args:
+                - model: A Keras model instance 
+        '''
+        # Checking if the input model is of a supported type
+        if isinstance(model, keras.models.Model) or isinstance(model, keras.Sequential) or isinstance(model, keras.Model):
+            # Extracting information about model layers
+            print(' --- --- --- --- --- --- get layers informations --- --- --- --- --- ---\n')
+            self.layers = []
+            for layer in model.layers:
+               
+                self.layers += [classBindings[layer.__class__.__name__](layer)]
+        else:
+
+            raise NotImplementedError(f'unhandled model type ({type(model)})')
+        
+        return
+
+    def __call__(self, input_data, **kwds: Any) -> Any:
+    # Ajoutez une impression pour vérifier que kwds contient beta
+        #print(f"[myModel.__call__] kwds before predict: {kwds}")
+        return self.predict(input_data, **kwds)
+
+    def predict(self, input_data, **kwds: Any) -> Any:
+    # Impression pour vérifier le contenu de kwds
+        #print(f"[myModel.predict] kwds: {kwds}")
+        copy_tensor = input_data
+
+        for layer in self.layers:
+        # Impression pour vérifier avant chaque appel de couche
+          #print(f"[myModel.predict] Calling layer with kwds: {kwds}")
+          result_tensor = layer(copy_tensor, **kwds)
+          copy_tensor = result_tensor
+
+        return result_tensor
+
+def test_model_with_affine(model, data_input, noise):
+    '''
+        Test the provided model with affine transformations using the given data input and noise level.
+
+        Args:
+            model: The model to be tested.
+            data_input: Path to the input data file ('data.pkl') containing necessary data.
+            noise: The noise level to be applied to the affine transformations.
+
+        Returns:
+            The results of testing the model with affine transformations
+
+    '''
+    # Initialize the model
+    surro_model = myModel(model)
+    # Load the data from the 'data.pkl' file
+    with open(data_input, 'rb') as file:
+        data = pickle.load(file)
+    # Set the parameters for the tests
+    n = data['image_shape'][0]
+    z = data['image_shape'][2]
+    input = data['images']
+
+    # Input for the usual affine
+    x_aff = [[[0.0 for _ in range(n)] for _ in range(n)] for _ in range(z)]
+    for h, i, j in product(range(z), range(n), range (n)):
+
+        x_aff[h][i][j] = Affine(x0 = float(input[i][j][h]), xi = {i * n + j: noise})  
+   
+    # Call test
+    print("+---------------------------------Usual_Affine -------------------------------------------------------")
+    print("| Input vector size: ", n)
+    print("| :: All AFFINE FORMS :: ")    
+
+    start = time.time()
+    result_aff = surro_model(x_aff)
+    end = time.time()
+    elapsed = end - start
+    print(f'Runtime for all usual affine : {elapsed:.2f}s')
+
+    return (result_aff)  
+
+def test_model_with_compressed(model, data_input, noise, factor_comp):
+    '''
+    Test the provided model with compressed affine transformations using the given data input, noise , and compression factor.
+
+    Args:
+        model: The model to be tested.
+        data_input: Path to the input data file ('data.pkl') containing necessary data.
+        noise: The noise level to be applied to the affine transformations.
+        factor_comp: The compression factor to be applied to the affine transformations.
+
+    Returns:
+        The results of testing the model with compressed affine transformations.
+    '''
+    
+    # Initialize the model
+    surro_model = myModel(model)
+    # Load the data from the 'data.pkl' file
+    with open(data_input, 'rb') as file:
+        data = pickle.load(file)
+    # Set the parameters for the tests
+    n = data['image_shape'][0]
+    z = data['image_shape'][2]
+    input = data['images']     
+    # Input for the compressed affine
+    x_comp = [[[0.0 for _ in range(n)] for _ in range(n)] for _ in range(z)]
+    for h, i, j in product(range(z), range(n), range(n)):
+        x_comp[h][i][j] = Affine(x0 = float(input[i][j][h]), xi = {i * n + j: noise}) 
+    # Call test    
+    print("+---------------------------------Affine _Compressed-------------------------------------------------------")
+    print("| Input vector size: ", n)
+    print("| Factor of compressed: ", factor_comp)
+    print("| :: All AFFINE FORMS :: ")
+
+    start = time.time()
+    if factor_comp != 1 :
+        result_comp = surro_model(x_comp,beta=factor_comp)
+    else:
+         print("NO compressed Factor")
+    end = time.time()
+    elapsed = end - start
+    print(f'Runtime for all compressed affine : {elapsed:.2f}s')
+      
+    return (result_comp)
+
+def test_model_with_bloc(model, data_input, noise, bloc_wise):
+    '''
+    Test the provided model with bloc wise noising transformations using the given data input, noise , and bloc_wise.
+
+    Args:
+        model: The model to be tested.
+        data_input: Path to the input data file ('data.pkl') containing necessary data.
+        noise: The noise level to be applied to the affine transformations.
+        bloc_wise: The number of blocs (4,8)
+
+    Returns:
+        The results of testing the model with bloc wise noisng transformations.
+    '''
+    # Initialize the model
+    surro_model = myModel(model)
+    # Load the data from the 'data.pkl' file
+    with open(data_input, 'rb') as file:
+        data = pickle.load(file)
+    # Set the parameters for the tests
+    n = data['image_shape'][0]
+    z = data['image_shape'][2]
+    s = n // 2
+    ss = n // 4
+    input = data['images'] 
+    # Input for the bloc wise affine (4 bloc)
+    x1 = b_n.bloc_haut_left(input, n, z, s, noise)
+    x2 = b_n.bloc_haut_right(input, n, z, s, noise)
+    x3 = b_n.bloc_bas_left(input, n, z, s, noise)
+    x4 = b_n.bloc_bas_right(input, n, z, s, noise)   
+    
+    # Input for the bloc wise affine (8 bloc)
+    y1 = b8.bloc1(input, n, z, s, ss, noise)
+    y2 = b8.bloc2(input, n, z, s, ss, noise)
+    y3 = b8.bloc3(input, n, z, s, ss, noise)
+    y4 = b8.bloc4(input, n, z, s, ss, noise)
+    y5 = b8.bloc5(input, n, z, s, ss, noise)
+    y6 = b8.bloc6(input, n, z, s, ss, noise)
+    y7 = b8.bloc7(input, n, z, s, ss, noise)
+    y8 = b8.bloc8(input, n, z, s, ss, noise)  
+    # Call test 
+    print("+---------------------------------Bloc_Wise_Affine------------------------------------------------------")
+    print("| Input vector size: ", n)
+    print("| Number of Bloc: ", bloc_wise)
+    print("| :: All AFFINE FORMS :: ")
+    start = time.time()
+    if bloc_wise == 4 :
+
+        values = [x1, x2, x3, x4]
+        for value in values:   
+            result_bloc = surro_model(value)
+          
+             
+       
+    elif bloc_wise == 8 :
+         
+         values = [y1, y2, y3, y4, y5, y6, y7, y8]
+         for value in values:
+            result_bloc = surro_model(value)
+           
+             
+    else:
+            print("Invalid bloc_wise value")
+
+    end = time.time()
+    elapsed = end - start
+    print(f'Runtime for bloc: {elapsed:.2f}s')
+   
+    return (result_bloc)    
+'''
+
+'''
+def test_model_with_mixed(model, data_input, noise, factor_comp,bloc_wise):
+
+    # Initialize the model
+    surro_model = myModel(model)
+    # Load the data from the 'data.pkl' file
+    with open(data_input, 'rb') as file:
+        data = pickle.load(file)
+    # Set the parameters for the tests
+    n = data['image_shape'][0]
+    z = data['image_shape'][2]
+    s = n // 2
+    ss = n // 4
+    input = data['images']     
+    # Input for the mixed affine (4 bloc)
+    x11 = b_n.bloc_haut_left(input, n, z, s, noise)
+    x22 = b_n.bloc_haut_right(input, n, z, s, noise)
+    x33 = b_n.bloc_bas_left(input, n, z, s, noise)
+    x44 = b_n.bloc_bas_right(input, n, z, s, noise)       
+    # Input for the mixed affine (8 bloc)
+    y11 = b8.bloc1(input, n, z, s, ss, noise)
+    y22 = b8.bloc2(input, n, z, s, ss, noise)
+    y33 = b8.bloc3(input, n, z, s, ss, noise)
+    y44 = b8.bloc4(input, n, z, s, ss, noise)
+    y55 = b8.bloc5(input, n, z, s, ss, noise)
+    y66 = b8.bloc6(input, n, z, s, ss, noise)
+    y77 = b8.bloc7(input, n, z, s, ss, noise)
+    y88 = b8.bloc8(input, n, z, s, ss, noise)  
+
+    # Call test
+    print("+---------------------------------Mixed_Affine------------------------------------------------------")
+    print("| Input vector size: ", n)
+    print("| Factor of compressed: ", factor_comp)
+    print("| Number of Bloc: ", bloc_wise)
+    print("| :: All AFFINE FORMS :: ")
+    start = time.time()
+    if bloc_wise == 4 :
+
+        values = [x11, x22, x33, x44]
+        for value in values:
+            result_mix = surro_model(value,beta=factor_comp)
+            
+             
+    elif bloc_wise == 8 :
+         values = [y11, y22, y33, y44, y55, y66, y77, y88]
+         for value in values:
+             result_mix = surro_model(value,beta=factor_comp)
+             
+    else:
+            print("Invalid bloc_mixed value")
+    end = time.time()
+    elapsed = end - start
+    print(f'Runtime for mixed: {elapsed:.2f}s')
+     
+    return (result_mix)    
+    
+
+def welcome_message():
+    deep_nn_ascii = """
+                                             
+  
+            ╗███╗░░██╗
+            ║████╗░██║
+            ║██╔██╗██║
+            ║██║╚████║              
+            ║██║░╚███║
+            ╚═╝░░╚═╝╚═╝
+
+                    ╗███╗░░██╗
+                    ║████╗░██║
+                    ║██╔██╗██║
+                    ║██║╚████║
+                    ║██║░╚███║
+                    ╚═╝░░╚═╝╚═╝    
+
+
+                                ║████████║ 
+                                ║██░░░░██║ 
+                                ║████████║         
+                                ║██░░░░██║     
+                                ║██░░░░██║ 
+                                ║██░░░░██║ 
+                                ╚═╝    ╚═╝
+
+             
+                                                
+                                            ║████████║                                                                      
+                                            ║██░░░░░░ 
+                                            ║████████║    
+                                            ║██░░     
+                                            ║██░░
+                                            ║██░░
+                                            ╚═╝                 ║████████║ 
+                                                                ║██░░░░░░ 
+                                                                ║████████║    
+                                                                ║██░░     
+                                                                ║██░░
+                                                                ║██░░
+                                                                ╚═╝ 
+
+"""
+
+    # Affichage du texte "DEEP NN"
+    print(deep_nn_ascii)
+    #./NnAff --model_path './nn_conv_mnist.h5' --data_path './mnist.pkl' --noise 0.02 --factor_comp 2
+    print("\nWelcome to our Neural Networks Verification Tool! 🧠🛠️\n")
+    time.sleep(2)
+
+    print("Initializing...")
+    time.sleep(1)
+    print("Loading Modules...")
+    time.sleep(1)
+    print("Ready to Verify Neural Networks!")
+if __name__ == '__main__':
+    welcome_message()
+    parser = argparse.ArgumentParser(description="Program for testing the model with data.")
+    parser.add_argument("--model_path", type=str, help="Path to the Keras model")
+    parser.add_argument("--data_path", type=str, help="Path to load the data")
+    parser.add_argument("--noise", type=float, default= None, help="Noise level")
+    parser.add_argument("--factor_comp", type=int, default = None, help="Compression factor")
+    parser.add_argument("--bloc_wise", type=int, default = None, help="bloc factor ")
+    parser.add_argument("--mixed", type=str, default="false", help="Mixed")
+    args = parser.parse_args()
+    # Load the data based on the provided index
+    data_input = args.data_path
+    model = keras.models.load_model(args.model_path)
+    noise = args.noise
+    factor_comp = args.factor_comp
+    bloc_wise = args.bloc_wise
+    mixed = args.mixed
+    # Check which parameters are provided and execute the relevant parts of the program
+    if args.model_path and args.data_path and args.noise is not None  and args.factor_comp is None and args.bloc_wise is None :   
+
+        test_model_with_affine(model, data_input, noise)
+        
+    if args.model_path and args.data_path and args.noise is not None and args.factor_comp is not None and args.bloc_wise is None : 
+
+        test_model_with_compressed(model, data_input, noise, factor_comp)
+        
+
+    if args.model_path and args.data_path and args.noise and args.bloc_wise is not None  and args.factor_comp is None  : 
+
+        test_model_with_bloc(model, data_input, noise, bloc_wise)
+
+    if args.model_path and args.data_path and args.noise and args.bloc_wise  and args.factor_comp is not None  : 
+
+        test_model_with_mixed(model, data_input, noise, factor_comp, bloc_wise)    
+        
+
+    
+
+
+
+
